@@ -46,6 +46,21 @@ export function futureDoses(s, horizonMs, now = Date.now()) {
   return out.sort((a, b) => a.t - b.t);
 }
 
+// Уколы до первой записи в журнале: если указано «на схеме с», достраиваем их по интервалу,
+// чтобы кривая не начиналась с нуля, когда человек колет давно.
+export function pastDoses(s, now = Date.now()) {
+  const out = [];
+  for (const p of s.protocol.filter((x) => x.active && x.since)) {
+    const logged = s.doses.filter((d) => d.compoundId === p.compoundId).map((d) => d.t);
+    const first = logged.length ? Math.min(...logged) : now;
+    for (let t = first - p.interval * DAY, i = 0; t >= p.since && i < 400; t -= p.interval * DAY, i++) {
+      out.push({ compoundId: p.compoundId, dose: p.dose, t, virtual: true });
+    }
+  }
+  return out;
+}
+export const allDoses = (s) => [...s.doses, ...pastDoses(s)];
+
 // Высвобождение активного вещества (мг/сут) по гормону в момент t.
 export function releaseAt(doses, hormone, t) {
   let sum = 0;
@@ -65,7 +80,7 @@ export function calibration(s) {
   for (const l of s.labs) {
     const v = l.values?.tt;
     if (v == null) continue;
-    const model = releaseAt(s.doses, 'testosterone', l.t) * POP_SCALE;
+    const model = releaseAt(allDoses(s), 'testosterone', l.t) * POP_SCALE;
     if (model > 1) pts.push(v / model);
   }
   const last = pts.slice(-3).sort((a, b) => a - b);
@@ -74,7 +89,7 @@ export function calibration(s) {
 }
 
 export function testoSeries(s, from, to, stepH = 2) {
-  const all = [...s.doses, ...futureDoses(s, to - Date.now())];
+  const all = [...allDoses(s), ...futureDoses(s, to - Date.now())];
   const { factor } = calibration(s);
   const out = [];
   for (let t = from; t <= to; t += stepH * 3600000) {
@@ -84,7 +99,7 @@ export function testoSeries(s, from, to, stepH = 2) {
 }
 
 export function releaseSeries(s, hormone, from, to, stepH = 2) {
-  const all = [...s.doses, ...futureDoses(s, to - Date.now())];
+  const all = [...allDoses(s), ...futureDoses(s, to - Date.now())];
   const out = [];
   for (let t = from; t <= to; t += stepH * 3600000) out.push({ t, v: releaseAt(all, hormone, t) });
   return out;
@@ -434,4 +449,12 @@ export function metabolism(s) {
   if (lv.ft3 && lv.ft3.v < 3.1) why.push({ st: 'warning', title: 'Т3 свободный низкий', text: 'Частая история после долгого дефицита: тело «прикручивает» обмен. Обычно выравнивается после выхода на поддержку.', fix: 'diet-break' });
   if (cur && cur.weekRate < 0 && weight && -cur.weekRate / weight > 0.01) why.push({ st: 'warning', title: 'Худеешь слишком быстро', text: `≈ ${round(-cur.weekRate, 2)} кг в неделю — больше 1% веса. Так уходят и мышцы, а обмен тормозит сильнее.` });
   return { trend, cur, weight, bmr, expected, adapt, hist, status, why, protein, sleepH, steps7, deficitWeeks, need: { kcalDays: rows.filter((r) => r.kcal).length, weightDays: rows.filter((r) => r.weight).length } };
+}
+
+export function needsSince(s) {
+  return s.protocol.filter((p) => p.active && !p.since && byId(p.compoundId)?.kind === 'aas').find((p) => {
+    const ds = s.doses.filter((d) => d.compoundId === p.compoundId).map((d) => d.t);
+    const c = byId(p.compoundId);
+    return !ds.length || Date.now() - Math.min(...ds) < c.decay * 5 * DAY;
+  }) || null;
 }

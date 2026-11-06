@@ -235,7 +235,7 @@ function viewToday() {
     hero = `<div class="card hero">
       <div class="row between"><span class="label">Тестостерон сейчас</span><span class="trend">${ic(trendTxt[0])}${trendTxt[1]}</span></div>
       <div class="big">≈ ${round(sum.cur, 0)}<small>нмоль/л</small></div>
-      <div class="xs muted">${cal.n ? `Откалибровано по анализам: ${cal.n}` : 'Грубая оценка — внеси анализ тестостерона, чтобы уточнить'}</div>
+      <div class="xs muted">≈ ${Math.round(sum.cur * 28.84 / 10) * 10} нг/дл. ${sum.cur > 29 ? `Это в ${round(sum.cur / 29, 1)} раза выше верхней границы нормы (29). ` : ''}${cal.n ? `Откалибровано по анализам: ${cal.n}` : 'Грубая оценка — внеси анализ тестостерона, чтобы уточнить'}</div>
       ${sum.interval ? `<div class="progress" aria-hidden="true"><i style="width:${pctCycle}%"></i></div>
       <div class="row between sm"><span>День ${round(sum.dayInCycle + 1, 0)} из ${round(sum.interval, 0)}</span>
       <span class="muted">${sum.next ? `Укол через ${fmtIn(sum.next.t - now)}` : ''}</span></div>` : ''}
@@ -252,6 +252,7 @@ function viewToday() {
   const trough = sum?.nextTrough ? `<div class="alert"><span class="ic st-info">${ic('info', 'ic')}</span><div><div class="t">Ближайший минимум — ${fmtDT(sum.nextTrough.t)}</div><div class="x">≈ ${round(sum.nextTrough.v, 0)} нмоль/л перед следующим уколом. В этот момент удобно сдавать анализы: минимум точнее всего калибрует модель.</div></div></div>` : '';
   return `<div class="top"><div><h1>Сегодня</h1><div class="sub">${d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}</div></div></div>
     ${hero}
+    ${E.needsSince(S) ? `<div class="alert"><span class="ic st-warning">${ic('warning', 'ic')}</span><div class="grow"><div class="t">Кривая начинается с нуля</div><div class="x">Модель видит только записанные уколы и думает, что ты только начал. Если колешь давно — укажи дату начала, и кривая станет реальной.</div><div style="margin-top:10px"><button class="btn sm soft" data-edit-protocol="${E.needsSince(S).id}">Указать дату</button></div></div></div>` : ''}
     <h2 class="sec">Показатели</h2>
     ${dashboard()}
     ${sum ? `<h2 class="sec">Тестостерон</h2><div class="card"><div class="row between"><h3>Кривая</h3></div>
@@ -320,6 +321,7 @@ function protocolSheet(p) {
     <label class="field"><span>Препарат</span><select class="input" name="c">${compoundOptions(p.compoundId)}</select></label>
     <div class="two"><label class="field"><span>Доза, мг</span><input class="input" name="dose" inputmode="decimal" value="${p.dose}"></label>
     <label class="field"><span>Каждые, дней</span><input class="input" name="int" inputmode="decimal" value="${p.interval}"></label></div>
+    <label class="field"><span>Колю по этой схеме с</span><input class="input" type="date" name="since" value="${p.since ? localInput(p.since).slice(0, 10) : ''}"><div class="help">Если колешь давно — укажи дату начала. Иначе модель решит, что ты только начал, и кривая стартует с нуля.</div></label>
     ${isNew ? `<label class="field"><span>Последний приём</span><input class="input" type="datetime-local" name="last" value="${localInput(Date.now())}"><div class="help">Отмечу его в журнале — с него начнётся кривая. Оставь пустым, если ещё не начинал.</div></label>` : ''}
     <div id="chk"></div>
     <div class="actions"><button class="btn block" data-save>Сохранить</button>
@@ -336,7 +338,8 @@ function protocolSheet(p) {
     $('[data-save]', el).onclick = () => {
       const dose = num($('[name=dose]', el).value), interval = num($('[name=int]', el).value);
       if (!dose || !interval || interval <= 0) return toast('Проверь дозу и интервал');
-      Object.assign(p, { compoundId: sel.value, dose, interval });
+      const sinceV = $('[name=since]', el).value;
+      Object.assign(p, { compoundId: sel.value, dose, interval, since: sinceV ? new Date(`${sinceV}T09:00`).getTime() : null });
       if (isNew) {
         S.protocol.push(p);
         const last = $('[name=last]', el).value;
@@ -810,6 +813,7 @@ function onboarding() {
     <div class="two"><label class="field"><span>Доза, мг</span><input class="input" name="dose" inputmode="decimal" value="500"></label>
     <label class="field"><span>Каждые, дней</span><input class="input" name="int" inputmode="decimal" value="5"></label></div>
     <label class="field"><span>Последний укол</span><input class="input" type="datetime-local" name="last" value="${localInput(Date.now() - DAY)}"></label>
+    <label class="field"><span>Колю так с</span><input class="input" type="date" name="since"><div class="help">Примерная дата начала. Если пусто — посчитаю, что ты только начал.</div></label>
     <div class="actions"><button class="btn block" data-save>Начать</button><button class="btn block ghost" data-skip>Заполню позже</button></div>`, (el) => {
     $('.scrim').onclick = null;
     const done = () => { S.onboarded = true; commit(); closeSheet(); render(); };
@@ -819,7 +823,8 @@ function onboarding() {
       const t = new Date($('[name=last]', el).value).getTime();
       if (!dose || !interval) return toast('Проверь дозу и интервал');
       const c = $('[name=c]', el).value;
-      S.protocol.push({ id: E.uid(), compoundId: c, dose, interval, active: true, start: Date.now() });
+      const sinceV = $('[name=since]', el).value;
+      S.protocol.push({ id: E.uid(), compoundId: c, dose, interval, active: true, start: Date.now(), since: sinceV ? new Date(`${sinceV}T09:00`).getTime() : null });
       if (Number.isFinite(t)) S.doses.push({ id: E.uid(), compoundId: c, dose, t, site: null, ml: dose / (byId(c).defaultConc || 250) });
       done();
     };
