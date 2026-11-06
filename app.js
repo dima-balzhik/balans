@@ -1,8 +1,11 @@
 import { SITES, SYMPTOM_SCALES, SYMPTOM_FLAGS, EVIDENCE, KIND_LABEL, ACTIONS, BP_ACTIONS, PLAIN, METAB_ACTIONS } from './data.js';
 import * as E from './engine.js';
+import * as X from './extra.js';
+import * as PH from './photos.js';
 
 const { DAY, COMPOUNDS, MARKERS, byId, markerById, fmtDate, fmtDT, fmtIn, round } = E;
 let S = E.load();
+S.workouts ||= []; S.measures ||= [];
 const commit = () => E.save(S);
 
 /* ---------- утилиты ---------- */
@@ -40,6 +43,8 @@ const P = {
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>',
   drop: '<path d="M12 2.7 6.3 8.4a8 8 0 1 0 11.4 0Z"/>',
+  ruler: '<path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.4 2.4 0 0 1 0-3.4l2.6-2.6a2.4 2.4 0 0 1 3.4 0ZM14.5 12.5l2-2M11.5 9.5l2-2M8.5 6.5l2-2M17.5 15.5l2-2"/>',
+  camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3Z"/><circle cx="12" cy="13" r="3"/>',
   pill: '<path d="m10.5 20.5 10-10a5 5 0 0 0-7-7l-10 10a5 5 0 0 0 7 7ZM8.5 8.5l7 7"/>',
 };
 const ic = (n, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n] || ''}</svg>`;
@@ -197,12 +202,16 @@ function dashboard() {
     const wk = M.trend.length > 7 ? M.weight - M.trend.at(-8).v : null;
     tiles.push(tile({ go: 'feel', label: 'Вес (тренд)', value: round(M.weight, 1), unit: 'кг', sub: wk != null ? `${wk >= 0 ? '+' : '−'}${round(Math.abs(wk), 1)} кг за неделю` : '', sp: spark(M.trend.slice(-30)) }));
   }
+  const e2e = X.e2Estimate(S);
+  if (e2e) tiles.push(tile({ go: 'marker:e2', label: 'E2 сейчас · оценка', value: round(e2e.now.v, 0), unit: 'пг/мл', st: e2e.now.st, stLabel: `${e2e.n ? 'по твоим анализам' : 'грубо, без анализа'}${e2e.peak ? ` · пик ≈ ${round(e2e.peak.v, 0)}` : ''}` }));
+  const hf = X.hctForecast(S);
   for (const id of ['hct', 'e2', 'hdl', 'tsh']) {
     if (!lv[id]) continue;
     const m = markerById(id), st = E.markerStatus(m, lv[id].v);
     const pts = S.labs.filter((l) => l.values[id] != null).sort((a, b) => a.t - b.t).map((l) => ({ v: l.values[id] }));
     const dir = lv[id].v > (m.hi ?? Infinity) ? 'выше нормы' : 'ниже нормы';
-    tiles.push(tile({ go: `marker:${id}`, label: m.name.replace(' (E2)', ''), value: round(lv[id].v, id === 'hdl' ? 2 : 1), unit: m.base, st, stLabel: st && st !== 'good' ? dir : `${fmtDate(lv[id].t)} · норма`, sp: spark(pts) }));
+    const fc = id === 'hct' && hf?.at54 ? `к 54% ≈ ${fmtDate(hf.at54)}` : null;
+    tiles.push(tile({ go: `marker:${id}`, label: id === 'e2' ? 'E2 · анализ' : m.name, value: round(lv[id].v, id === 'hdl' ? 2 : 1), unit: m.base, st, stLabel: fc || (st && st !== 'good' ? dir : `${fmtDate(lv[id].t)} · норма`), sp: spark(pts) }));
   }
   const sym = S.symptoms.filter((x) => now - x.t < 7 * DAY);
   if (sym.length) {
@@ -224,7 +233,8 @@ function viewToday() {
   const sum = E.testoSummary(S);
   const cal = E.calibration(S);
   const load = E.weeklyLoad(S);
-  const rem = [...E.reminders(S).filter((x) => x.action !== 'bp'), ...E.symptomHints(S)];
+  const rem = [...E.reminders(S).filter((x) => x.action !== 'bp' && x.action !== 'labs'), ...E.symptomHints(S)];
+  const todos = X.todayTodos(S);
   const risks = E.checkStack(S).filter((r) => r.st === 'critical' || r.st === 'serious');
   const others = E.activeHormones(S).filter((h) => h !== 'testosterone');
   const d = new Date();
@@ -237,7 +247,7 @@ function viewToday() {
       <div class="big">≈ ${round(sum.cur, 0)}<small>нмоль/л</small></div>
       <div class="xs muted">≈ ${Math.round(sum.cur * 28.84 / 10) * 10} нг/дл. ${sum.cur > 29 ? `Это в ${round(sum.cur / 29, 1)} раза выше верхней границы нормы (29). ` : ''}${cal.n ? `Откалибровано по анализам: ${cal.n}` : 'Грубая оценка — внеси анализ тестостерона, чтобы уточнить'}</div>
       ${sum.interval ? `<div class="progress" aria-hidden="true"><i style="width:${pctCycle}%"></i></div>
-      <div class="row between sm"><span>День ${round(sum.dayInCycle + 1, 0)} из ${round(sum.interval, 0)}</span>
+      <div class="row between sm"><span>${sum.dayInCycle >= sum.interval - 0.5 ? 'Укол сегодня' : `День ${Math.floor(sum.dayInCycle) + 1} из ${round(sum.interval, 0)}`}</span>
       <span class="muted">${sum.next ? `Укол через ${fmtIn(sum.next.t - now)}` : ''}</span></div>` : ''}
       <button class="btn block" style="margin-top:14px" data-act="log-dose">${ic('syringe')}Отметить укол</button>
     </div>`;
@@ -252,6 +262,7 @@ function viewToday() {
   const trough = sum?.nextTrough ? `<div class="alert"><span class="ic st-info">${ic('info', 'ic')}</span><div><div class="t">Ближайший минимум — ${fmtDT(sum.nextTrough.t)}</div><div class="x">≈ ${round(sum.nextTrough.v, 0)} нмоль/л перед следующим уколом. В этот момент удобно сдавать анализы: минимум точнее всего калибрует модель.</div></div></div>` : '';
   return `<div class="top"><div><h1>Сегодня</h1><div class="sub">${d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}</div></div></div>
     ${hero}
+    ${todos.length ? `<h2 class="sec">На сегодня</h2><div class="card tight">${todos.map((t) => `<button class="li" data-todo="${t.act}"><span class="st-${t.st}">${ic(t.icon)}</span><div class="grow"><div class="t">${esc(t.title)}</div><div class="d">${esc(t.text)}</div></div>${ic('chev', 'chev')}</button>`).join('')}</div>` : ''}
     ${E.needsSince(S) ? `<div class="alert"><span class="ic st-warning">${ic('warning', 'ic')}</span><div class="grow"><div class="t">Кривая начинается с нуля</div><div class="x">Модель видит только записанные уколы и думает, что ты только начал. Если колешь давно — укажи дату начала, и кривая станет реальной.</div><div style="margin-top:10px"><button class="btn sm soft" data-edit-protocol="${E.needsSince(S).id}">Указать дату</button></div></div></div>` : ''}
     <h2 class="sec">Показатели</h2>
     ${dashboard()}
@@ -339,6 +350,7 @@ function protocolSheet(p) {
       const dose = num($('[name=dose]', el).value), interval = num($('[name=int]', el).value);
       if (!dose || !interval || interval <= 0) return toast('Проверь дозу и интервал');
       const sinceV = $('[name=since]', el).value;
+      if (!isNew && (p.dose !== dose || p.interval !== interval || p.compoundId !== sel.value)) p.changedAt = Date.now();
       Object.assign(p, { compoundId: sel.value, dose, interval, since: sinceV ? new Date(`${sinceV}T09:00`).getTime() : null });
       if (isNew) {
         S.protocol.push(p);
@@ -415,27 +427,185 @@ function vialSheet(v) {
 }
 
 /* ---------- Дневник: тело + самочувствие ---------- */
+let feelTab = 'day';
 function viewFeel() {
+  const seg = `<div class="seg" style="margin:0 0 16px">${[['day', 'День'], ['body', 'Тело'], ['gym', 'Зал']].map(([v, l]) => `<button data-feel="${v}" aria-pressed="${feelTab === v}">${l}</button>`).join('')}</div>`;
+  const sub = { day: 'Самочувствие и что на что влияет', body: 'Метаболизм, замеры, фото', gym: 'Силовые на фоне курса' }[feelTab];
+  const head = `<div class="top"><div><h1>Дневник</h1><div class="sub">${sub}</div></div></div>${seg}`;
+  if (feelTab === 'body') return head + viewBody();
+  if (feelTab === 'gym') return head + viewGym();
+  return head + viewDay();
+}
+
+function viewDay() {
   const today = S.symptoms.find((x) => dayKey(x.t) === dayKey(Date.now()));
   const hints = E.symptomHints(S);
   const byDay = E.libidoByCycleDay(S);
   const hist = [...S.symptoms].sort((a, b) => b.t - a.t).slice(0, 14);
   const enough = byDay.reduce((a, x) => a + x.n, 0) >= 8;
-  const M = E.metabolism(S);
+  const C = X.correlations(S);
   const todayLine = today ? [today.weight && `${round(today.weight, 1)} кг`, today.kcal && `${today.kcal} ккал`, today.steps && `${today.steps} шагов`, `либидо ${today.libido}`].filter(Boolean).join(' · ') : '';
-  return `<div class="top"><div><h1>Дневник</h1><div class="sub">Тело и самочувствие — раз в день, 30 секунд</div></div></div>
-    <div class="card"><div class="row between"><h3>${today ? 'Сегодня отмечено' : 'Как ты сегодня?'}</h3>${today ? badge('good', 'готово') : ''}</div>
+  return `<div class="card"><div class="row between"><h3>${today ? 'Сегодня отмечено' : 'Как ты сегодня?'}</h3>${today ? badge('good', 'готово') : ''}</div>
       <div class="sm muted" style="margin:4px 0 12px">${today ? esc(todayLine) : 'Вес утром, калории, шаги, сон, либидо и симптомы'}</div>
       <button class="btn block ${today ? 'ghost' : ''}" data-act="checkin">${today ? 'Изменить' : 'Отметить'}</button></div>
-    <h2 class="sec">Метаболизм</h2>
-    ${metabCard(M)}
-    ${M.why.length ? `<h2 class="sec">Почему замедляется</h2>${M.why.map((w) => alertBox(w, w.fix ? `<div style="margin-top:10px"><button class="btn sm soft" data-metab="${w.fix}">Что делать</button></div>` : w.labs ? `<div style="margin-top:10px"><button class="btn sm soft" data-marker-go="tsh">Подробнее</button></div>` : '')).join('')}` : ''}
-    <div class="card tight"><button class="li" data-act="metab-actions">${ic('up')}<div class="grow"><div class="t">Как разогнать обмен</div><div class="d">Что реально работает — в цифрах</div></div>${ic('chev', 'chev')}</button></div>
     ${hints.length ? `<h2 class="sec">Подсказки</h2>${hints.map((h) => alertBox(h, h.labs ? `<div class="xs muted" style="margin-top:6px">Сдать: ${h.labs.map((id) => markerById(id).name).join(', ')}</div>` : '')).join('')}` : ''}
+    <h2 class="sec">Что на что влияет</h2>
+    <div class="card ${C.items.length ? 'tight' : ''}">${C.items.length ? C.items.map((c) => `<div class="li"><span class="${c.good ? 'st-good' : 'st-warning'}">${ic(c.good ? 'up' : 'down')}</span><div class="grow sm">${esc(c.text)}</div></div>`).join('') + '<div class="xs muted" style="padding:10px 18px 14px">Это закономерности в твоих данных, а не доказанная причина. Чем больше дней в дневнике, тем точнее.</div>' : `<div class="sm muted">Нужно хотя бы 10–14 дней дневника со сном, шагами и самочувствием (сейчас ${C.days}). Тогда покажу, например: «когда спишь 7+ ч, либидо выше на 1 балл».</div>`}</div>
     <h2 class="sec">Либидо по дням после укола</h2>
     <div class="card">${enough ? `<div class="bars" role="img" aria-label="Среднее либидо по дням цикла">${byDay.map((b) => `<div class="b" title="День ${b.day + 1}: ${round(b.v, 1)} из 5"><span>${round(b.v, 1)}</span><i style="height:${(b.v / 5) * 70}px"></i><span>д${b.day + 1}</span></div>`).join('')}</div><div class="xs muted" style="margin-top:8px">Среднее по шкале 1–5. Если провал всегда в одни и те же дни — это связано с фазой кривой.</div>` : `<div class="empty">Нужно 8+ отметок — тогда покажу, в какие дни цикла либидо проседает</div>`}</div>
     <h2 class="sec">История</h2>
     <div class="card tight">${hist.length ? hist.map((x) => `<button class="li" data-sym="${x.id}"><div class="grow"><div class="t">${fmtDate(x.t)}${x.weight ? ` · ${round(x.weight, 1)} кг` : ''}</div><div class="d">${[x.kcal && `${x.kcal} ккал`, `Либидо ${x.libido}`, `Эрекция ${x.erection}`, ...(x.flags || []).map((f) => SYMPTOM_FLAGS.find((y) => y.id === f)?.name)].filter(Boolean).join(' · ')}</div></div>${ic('chev', 'chev')}</button>`).join('') : '<div class="empty">Отметок пока нет</div>'}</div>`;
+}
+
+function viewBody() {
+  const M = E.metabolism(S);
+  const ms = X.measureSummary(S);
+  const delta = (k) => {
+    if (!ms?.ref || ms.last[k] == null || ms.ref[k] == null) return '';
+    const d = ms.last[k] - ms.ref[k];
+    if (Math.abs(d) < 0.05) return 'без изменений';
+    return `${d > 0 ? '+' : '−'}${round(Math.abs(d), 1)} ${k === 'bf' ? '%' : 'см'} с ${fmtDate(ms.ref.t)}`;
+  };
+  return `<h2 class="sec">Метаболизм</h2>
+    ${metabCard(M)}
+    ${M.why.length ? `<h2 class="sec">Почему замедляется</h2>${M.why.map((w) => alertBox(w, w.fix ? `<div style="margin-top:10px"><button class="btn sm soft" data-metab="${w.fix}">Что делать</button></div>` : w.labs ? `<div style="margin-top:10px"><button class="btn sm soft" data-marker-go="tsh">Подробнее</button></div>` : '')).join('')}` : ''}
+    <div class="card tight"><button class="li" data-act="metab-actions">${ic('up')}<div class="grow"><div class="t">Как разогнать обмен</div><div class="d">Что реально работает — в цифрах</div></div>${ic('chev', 'chev')}</button></div>
+    <h2 class="sec">Замеры</h2>
+    <div class="card">${ms ? `<div class="xs muted" style="margin-bottom:10px">Последние: ${fmtDate(ms.last.t)}</div><div class="mgrid">${X.MEASURES.filter(([k]) => ms.last[k] != null).map(([k, l]) => `<div class="m"><div class="k">${l}</div><div class="v">${round(ms.last[k], 1)}<small>${k === 'bf' ? '%' : 'см'}</small></div><div class="d">${delta(k)}</div></div>`).join('')}</div>` : '<div class="sm muted">Раз в неделю, утром, в одном месте: талия на уровне пупка, грудь, бицепс, бедро. Вес может стоять, а талия уходить — это и есть прогресс.</div>'}
+      <button class="btn sm soft" style="margin-top:12px" data-act="measure">${ic('plus')}Замер</button></div>
+    <h2 class="sec">Фото прогресса</h2>
+    <div class="card"><div class="photos" id="photos"><div class="sm muted">Загрузка…</div></div>
+      <div class="row" style="margin-top:12px"><button class="btn sm soft grow" data-act="add-photo">${ic('camera')}Добавить фото</button></div>
+      <div class="xs muted" style="margin-top:8px">Фото хранятся только на этом телефоне и не попадают в копию данных. Снимай раз в неделю: тот же свет, поза и время.</div></div>`;
+}
+
+function viewGym() {
+  const list = X.strength(S);
+  return `<div class="card"><h3>Силовые</h3><p class="sm muted" style="margin:6px 0 12px">Записывай лучший рабочий подход по базовым упражнениям. Посчитаю примерный максимум на 1 раз — делать его на самом деле не нужно.</p>
+      <button class="btn block" data-act="add-set">${ic('plus')}Записать подход</button></div>
+    ${list.length ? list.map((x) => `<div class="card"><div class="row between"><h3>${esc(x.ex)}</h3>${x.change != null ? badge(x.change >= 0.01 ? 'good' : x.change <= -0.03 ? 'warning' : 'info', `${x.change >= 0 ? '+' : '−'}${round(Math.abs(x.change * 100), 0)}% за 4 нед`) : ''}</div>
+      <div class="row between" style="margin-top:6px"><div><div style="font-size:28px;font-weight:700">≈ ${round(x.last.e, 0)}<small class="sm muted"> кг на 1 раз</small></div><div class="xs muted">последний: ${round(x.last.w, 1)} кг × ${x.last.reps} · ${fmtDate(x.last.t)} · рекорд ≈ ${round(x.best, 0)}</div></div></div>
+      ${x.arr.length >= 2 ? `<div class="chart" data-ex-chart="${esc(x.ex)}" style="margin-top:10px"></div>` : ''}</div>`).join('')
+      : '<div class="empty">Пока нет записей. Начни с жима, приседа и становой.</div>'}
+    ${(S.workouts || []).length ? `<h2 class="sec">Последние подходы</h2><div class="card tight">${[...S.workouts].sort((a, b) => b.t - a.t).slice(0, 10).map((w) => `<button class="li" data-set="${w.id}"><div class="grow"><div class="t">${esc(w.ex)} · ${round(w.w, 1)} кг × ${w.reps}</div><div class="d">${fmtDate(w.t)}</div></div>${ic('chev', 'chev')}</button>`).join('')}</div>` : ''}`;
+}
+
+function setSheet(w) {
+  const isNew = !w;
+  const lastEx = [...(S.workouts || [])].sort((a, b) => b.t - a.t)[0]?.ex || X.EXERCISES[0];
+  w ||= { id: E.uid(), t: Date.now(), ex: lastEx, w: '', reps: '' };
+  const opts = [...new Set([...X.EXERCISES, ...(S.workouts || []).map((x) => x.ex)])];
+  sheet(`<h2>${isNew ? 'Подход' : 'Изменить подход'}</h2>
+    <label class="field"><span>Упражнение</span><select class="input" name="ex">${opts.map((o) => `<option ${o === w.ex ? 'selected' : ''}>${esc(o)}</option>`).join('')}<option value="__new">Другое…</option></select></label>
+    <label class="field" id="exnew" style="display:none"><span>Название</span><input class="input" name="exn"></label>
+    <div class="two"><label class="field"><span>Вес, кг</span><input class="input" name="w" inputmode="decimal" value="${w.w}"></label>
+    <label class="field"><span>Повторений</span><input class="input" name="reps" inputmode="numeric" value="${w.reps}"></label></div>
+    <label class="field"><span>Дата</span><input class="input" type="date" name="d" value="${localInput(w.t).slice(0, 10)}"></label>
+    <div class="actions"><button class="btn block" data-save>Сохранить</button>${isNew ? '' : '<button class="btn block danger" data-del>Удалить</button>'}<button class="btn block ghost" data-close>Отмена</button></div>`, (el) => {
+    const sel = $('[name=ex]', el);
+    sel.onchange = () => ($('#exnew', el).style.display = sel.value === '__new' ? '' : 'none');
+    $('[data-save]', el).onclick = () => {
+      const ex = sel.value === '__new' ? $('[name=exn]', el).value.trim() : sel.value;
+      const wt = num($('[name=w]', el).value), reps = num($('[name=reps]', el).value);
+      if (!ex || !wt || !reps || reps > 50) return toast('Проверь упражнение, вес и повторы');
+      Object.assign(w, { ex, w: wt, reps: Math.round(reps), t: new Date(`${$('[name=d]', el).value}T18:00`).getTime() });
+      S.workouts ||= [];
+      if (isNew) S.workouts.push(w);
+      commit(); closeSheet(); render(); toast(`≈ ${round(X.e1rm(wt, reps), 0)} кг на 1 раз`);
+    };
+    $('[data-del]', el)?.addEventListener('click', () => { S.workouts = S.workouts.filter((x) => x.id !== w.id); commit(); closeSheet(); render(); });
+  });
+}
+
+function measureSheet() {
+  const prev = X.measureSummary(S)?.last || {};
+  const m = { id: E.uid(), t: Date.now() };
+  sheet(`<h2>Замеры</h2>
+    <div class="two">${X.MEASURES.map(([k, l]) => `<label class="field"><span>${l}${k === 'bf' ? '' : ', см'}</span><input class="input" name="${k}" inputmode="decimal" placeholder="${prev[k] != null ? round(prev[k], 1) : '—'}"></label>`).join('')}</div>
+    <label class="field"><span>Дата</span><input class="input" type="date" name="d" value="${localInput(Date.now()).slice(0, 10)}"></label>
+    <div class="xs muted" style="margin:0 4px 12px">Серым — прошлый замер. Пустые поля можно пропустить.</div>
+    <div class="actions"><button class="btn block" data-save>Сохранить</button><button class="btn block ghost" data-photo>${ic('camera')}Сохранить и добавить фото</button><button class="btn block ghost" data-close>Отмена</button></div>`, (el) => {
+    const save = () => {
+      let any = false;
+      for (const [k] of X.MEASURES) { const v = num($(`[name=${k}]`, el).value); if (v != null) { m[k] = v; any = true; } }
+      m.t = new Date(`${$('[name=d]', el).value}T09:00`).getTime();
+      if (!any) { toast('Введи хотя бы один замер'); return false; }
+      S.measures ||= []; S.measures.push(m); commit(); return true;
+    };
+    $('[data-save]', el).onclick = () => { if (save()) { closeSheet(); render(); toast('Сохранено'); } };
+    $('[data-photo]', el).onclick = () => { if (save()) { closeSheet(); render(); pickPhoto(); } };
+  });
+}
+
+function pickPhoto() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = async () => {
+    const f = inp.files?.[0]; if (!f) return;
+    try {
+      const blob = await PH.compress(f);
+      await PH.addPhoto({ id: E.uid(), t: Date.now(), blob });
+      toast('Фото сохранено'); render();
+    } catch { toast('Не удалось сохранить фото'); }
+  };
+  inp.click();
+}
+
+let photoUrls = [];
+async function fillPhotos(el) {
+  photoUrls.forEach((u) => URL.revokeObjectURL(u)); photoUrls = [];
+  let list = [];
+  try { list = await PH.listPhotos(); } catch { el.innerHTML = '<div class="sm muted">Фото недоступны в этом режиме браузера.</div>'; return; }
+  if (!list.length) { el.innerHTML = '<div class="sm muted">Фото пока нет.</div>'; return; }
+  el.innerHTML = list.map((p) => { const u = URL.createObjectURL(p.blob); photoUrls.push(u); return `<button class="ph" data-ph="${p.id}"><img src="${u}" alt="Фото ${fmtDate(p.t)}" loading="lazy"><span>${fmtDate(p.t)}</span></button>`; }).join('');
+  $$('[data-ph]', el).forEach((b) => (b.onclick = () => photoSheet(list, b.dataset.ph)));
+}
+
+function photoSheet(list, id) {
+  const p = list.find((x) => x.id === id), first = list.at(-1);
+  const u = URL.createObjectURL(p.blob), u0 = first !== p ? URL.createObjectURL(first.blob) : null;
+  sheet(`<h2>Фото · ${fmtDate(p.t)}</h2>
+    ${u0 ? `<div class="seg" style="margin-bottom:12px"><button data-v="one" aria-pressed="true">Это фото</button><button data-v="cmp" aria-pressed="false">Сравнить с первым</button></div>` : ''}
+    <div id="phv"><img class="ph-full" src="${u}" alt=""></div>
+    <div class="actions"><button class="btn block danger" data-del>Удалить фото</button><button class="btn block ghost" data-close>Закрыть</button></div>`, (el) => {
+    segBind(el, (seg, v) => {
+      $('#phv', el).innerHTML = v === 'cmp' ? `<div class="cmp"><figure><img src="${u0}" alt=""><figcaption>${fmtDate(first.t)}</figcaption></figure><figure><img src="${u}" alt=""><figcaption>${fmtDate(p.t)}</figcaption></figure></div>` : `<img class="ph-full" src="${u}" alt="">`;
+    });
+    $('[data-del]', el).onclick = async () => { if (!confirm('Удалить фото?')) return; await PH.deletePhoto(p.id); closeSheet(); render(); };
+  });
+}
+
+function hctCard() {
+  const f = X.hctForecast(S);
+  if (!f) return '';
+  if (f.slope == null) return `<div class="alert"><span class="ic st-info">${ic('info', 'ic')}</span><div class="x">Для прогноза нужен ещё один анализ хотя бы через 2 недели — тогда покажу, куда идёт гематокрит.</div></div>`;
+  const rate = `${f.perMonth >= 0 ? '+' : '−'}${round(Math.abs(f.perMonth), 1)}% в месяц`;
+  let main, st;
+  if (f.slope <= 0) { main = 'Гематокрит не растёт — хорошо.'; st = 'good'; }
+  else if (f.at54) { main = `При таком темпе до 54% (опасная зона) дойдёшь примерно к ${fmtDate(f.at54)}. Сдай ОАК за неделю до этого и обсуди с врачом донацию.`; st = f.at54 - Date.now() < 30 * DAY ? 'serious' : 'warning'; }
+  else if (f.at52) { main = `До 52% — примерно к ${fmtDate(f.at52)}.`; st = 'warning'; }
+  else { main = 'В ближайшие 4 месяца в опасную зону не выходит.'; st = 'good'; }
+  return `<h2 class="sec">Прогноз</h2><div class="alert"><span class="ic st-${st}">${ic(st, 'ic')}</span><div class="grow"><div class="t">${rate}</div><div class="x">${main}</div><div class="ev"><span class="dot yellow"></span>Точность ${f.conf}: ${f.n} анализа. Обычно рост замедляется через 3–6 месяцев.</div></div></div>`;
+}
+
+function e2Card() {
+  const e = X.e2Estimate(S);
+  if (!e) return '';
+  const lab = e.n ? `по твоим анализам (${e.n})` : 'грубо, по средним данным — сдай E2 вместе с тестом, и оценка станет твоей';
+  return `<h2 class="sec">Оценка сейчас</h2><div class="card"><div class="row between"><div><div class="xs muted">E2 по модели</div><div style="font-size:30px;font-weight:700">≈ ${round(e.now.v, 0)} <small class="sm muted">пг/мл</small></div></div>${e.now.st ? badge(e.now.st) : ''}</div>
+    <div class="stats" style="margin:12px 0 0"><div class="stat" style="background:var(--s2)"><div class="k">На пике</div><div class="v">${e.peak ? round(e.peak.v, 0) : '—'}</div></div><div class="stat" style="background:var(--s2)"><div class="k">Перед уколом</div><div class="v">${e.trough ? round(e.trough.v, 0) : '—'}</div></div><div class="stat" style="background:var(--s2)"><div class="k">E2 на 1 нмоль теста</div><div class="v">${round(e.k, 2)}</div></div></div>
+    <div class="xs muted" style="margin-top:10px">Считаю ${lab}.${e.hasAI ? ' Учитывает текущую дозу анастрозола — если её изменишь, нужен новый анализ.' : ''}</div></div>`;
+}
+
+function planHtml() {
+  const P = X.labPlan(S);
+  const v = P.visit;
+  const dd = (t) => { const d = Math.round((t - Date.now()) / DAY); return d < -1 ? `просрочено на ${-d} дн.` : d <= 0 ? 'сейчас' : `через ${d} дн.`; };
+  return `<h2 class="sec">План анализов</h2>
+    <div class="card"><div class="row between"><div><div class="xs muted">Следующая сдача</div><div style="font-size:24px;font-weight:700">${fmtDate(v.t)}</div></div>${badge(v.t < Date.now() ? 'serious' : v.t - Date.now() < 3 * DAY ? 'warning' : 'info', dd(v.t))}</div>
+      <div class="sm" style="margin-top:6px">${v.beforeInjection ? 'Утром, натощак, до укола — так модель калибруется точнее всего.' : 'Утром, натощак.'} Без тренировки накануне.</div>
+      <div class="chips" style="margin-top:12px">${v.items.map((i) => `<span class="chip">${esc(i.name)}</span>`).join('')}</div>
+      <button class="btn sm soft" style="margin-top:12px" data-act="ics">${ic('cal')}В календарь</button></div>
+    <div class="card tight">${P.items.map((i) => `<div class="li"><div class="grow"><div class="t">${esc(i.name)}</div><div class="d">${esc(i.reason || i.why)} · раз в ${Math.round(i.every / 7)} нед.</div></div><div class="end"><div class="sm">${i.last ? fmtDate(i.due) : 'ещё не сдавал'}</div>${i.overdue || !i.last ? badge('warning', i.last ? 'пора' : 'сдать') : `<div class="d">${dd(i.due)}</div>`}</div></div>`).join('')}</div>`;
 }
 
 function metabCard(M) {
@@ -532,6 +702,7 @@ function viewHealth() {
   const lastDon = S.donations.reduce((m, d) => Math.max(m, d.t), 0);
   const hasAny = Object.keys(lv).length;
   return `<div class="top"><div><h1>Здоровье</h1><div class="sub">Анализы, давление, донации</div></div><button class="icon-btn" aria-label="Добавить анализы" data-act="add-lab">${ic('plus')}</button></div>
+    ${planHtml()}
     <h2 class="sec">Давление</h2>
     <div class="card">${avg ? `<div class="row between"><div><div class="xs muted">Среднее за 7 дней · ${week.length} изм.</div><div style="font-size:28px;font-weight:700;font-variant-numeric:tabular-nums">${Math.round(avg.sys)}/${Math.round(avg.dia)}</div></div>${badge(avgSt.st, avgSt.label)}</div>` : '<div class="sm muted">Измерений за неделю нет. Мерь утром, сидя, после 5 минут покоя.</div>'}
       <div class="row" style="margin-top:14px"><button class="btn sm grow" data-act="add-bp">${ic('plus')}Измерение</button>${avgSt && avgSt.st !== 'good' ? `<button class="btn sm soft grow" data-act="bp-actions">Что делать</button>` : ''}</div></div>
@@ -637,6 +808,7 @@ function viewMarker(id) {
     <div class="top"><div><h1 style="font-size:26px">${m.name}</h1><div class="sub">Норма ${normText(m)} ${m.base}</div></div></div>
     ${last ? `<div class="card"><div class="row between"><div><div class="xs muted">${fmtDT(last.t)}</div><div style="font-size:32px;font-weight:700">${round(last.v, 2)} <small class="sm muted">${m.base}</small></div></div>${st ? badge(st) : ''}</div>
       ${pts.length > 1 ? `<div class="chart" id="ch-marker" style="margin-top:12px"></div>` : ''}</div>` : ''}
+    ${id === 'hct' ? hctCard() : ''}${id === 'e2' ? e2Card() : ''}
     ${plainHtml(m, last, st)}
     ${m.note ? `<div class="alert"><span class="ic st-info">${ic('info', 'ic')}</span><div class="x">${esc(m.note)}</div></div>` : ''}
     ${a ? `<h2 class="sec">${out ? 'Что можно сделать' : 'Если показатель уйдёт из нормы'}</h2>${actionsHtml(a)}` : ''}
@@ -755,6 +927,17 @@ function bind(v) {
   }
   $$('[data-metab]', v).forEach((b) => (b.onclick = () => metabActionsSheet(b.dataset.metab)));
   $$('[data-marker-go]', v).forEach((b) => (b.onclick = () => go('health', { kind: 'marker', id: b.dataset.markerGo })));
+  $$('[data-feel]', v).forEach((b) => (b.onclick = () => { feelTab = b.dataset.feel; render(); }));
+  $$('[data-todo]', v).forEach((b) => (b.onclick = () => { const a = b.dataset.todo; if (a === 'plan') go('health'); else if (a === 'doses') go('doses'); else ACT[a]?.(); }));
+  $$('[data-set]', v).forEach((b) => (b.onclick = () => setSheet(S.workouts.find((w) => w.id === b.dataset.set))));
+  $$('[data-ex-chart]', v).forEach((el) => {
+    const x = X.strength(S).find((q) => q.ex === el.dataset.exChart);
+    if (!x) return;
+    const pts = x.arr.map((w) => ({ t: w.t, v: w.e }));
+    lineChart(el, { series: pts, from: pts[0].t - DAY, to: pts.at(-1).t + DAY, unit: 'кг', h: 140, labs: pts, minV: Math.min(...pts.map((q) => q.v)) * 0.95 });
+  });
+  const phEl = $('#photos', v);
+  if (phEl) fillPhotos(phEl);
   $$('[data-tile]', v).forEach((b) => (b.onclick = () => { const g = b.dataset.tile; if (g.startsWith('marker:')) go('health', { kind: 'marker', id: g.slice(7) }); else go(g); }));
   $$('[data-range]', v).forEach((b) => (b.onclick = () => { range = +b.dataset.range; render(); }));
   $$('[data-back]', v).forEach((b) => (b.onclick = () => { if (sub?.kind === 'compound') go('more', { kind: 'db' }); else go(tab); }));
@@ -775,6 +958,9 @@ const ACT = {
   'add-protocol': () => protocolSheet(),
   'add-vial': () => vialSheet(),
   checkin: () => checkinSheet(),
+  measure: () => measureSheet(),
+  'add-set': () => setSheet(),
+  'add-photo': () => pickPhoto(),
   profile: () => profileSheet(),
   'metab-actions': () => metabActionsSheet(),
   'add-lab': () => labSheet(),
@@ -785,7 +971,7 @@ const ACT = {
   }),
   db: () => go('more', { kind: 'db' }),
   report: () => { buildReport(); setTimeout(() => window.print(), 100); },
-  ics: () => { if (!S.protocol.some((p) => p.active)) return toast('Сначала добавь схему'); shareFile('balans-napominaniya.ics', 'text/calendar', E.buildIcs(S)); },
+  ics: () => { if (!S.protocol.some((p) => p.active)) return toast('Сначала добавь схему'); shareFile('balans-napominaniya.ics', 'text/calendar', E.buildIcs(S, X.labPlan(S).visit)); },
   backup: () => shareFile(`balans-${new Date().toISOString().slice(0, 10)}.json`, 'application/json', JSON.stringify(S)),
   restore: () => {
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/json,.json';

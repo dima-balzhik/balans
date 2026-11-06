@@ -9,7 +9,7 @@ const POP_SCALE = 1.94;
 
 /* ---------- хранилище ---------- */
 const KEY = 'balans.v1';
-const EMPTY = { v: 1, onboarded: false, protocol: [], doses: [], vials: [], symptoms: [], labs: [], bp: [], donations: [], units: {} };
+const EMPTY = { v: 1, onboarded: false, protocol: [], doses: [], vials: [], symptoms: [], labs: [], bp: [], donations: [], units: {}, workouts: [], measures: [] };
 
 export function load() {
   try {
@@ -336,7 +336,7 @@ export const round = (v, n = 1) => (v == null ? '—' : (Math.round(v * 10 ** n)
 
 /* ---------- календарь (.ics) ---------- */
 const icsDate = (t) => new Date(t).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-export function buildIcs(s) {
+export function buildIcs(s, visit) {
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Balans//RU', 'CALSCALE:GREGORIAN'];
   const ev = (t, title, desc, alarms) => {
     lines.push('BEGIN:VEVENT', `UID:${uid()}@balans`, `DTSTAMP:${icsDate(Date.now())}`, `DTSTART:${icsDate(t)}`, `DTEND:${icsDate(t + 15 * 60000)}`, `SUMMARY:${title}`, `DESCRIPTION:${desc}`);
@@ -347,9 +347,12 @@ export function buildIcs(s) {
     const c = byId(d.compoundId);
     ev(d.t, `Баланс: ${c.short} ${d.dose} мг`, 'Отметь приём в приложении', ['-PT0M', '-PT1H']);
   }
+  if (visit) {
+    ev(visit.t, 'Баланс: сдать анализы', `Утром, натощак${visit.beforeInjection ? ', до укола' : ''}: ${visit.items.map((i) => i.name).join(', ')}`, ['-P1D', '-PT0M']);
+  }
   const next = futureDoses(s, 60 * DAY).find((d) => byId(d.compoundId)?.hormone === 'testosterone');
   const lab = lastLabDate(s);
-  if (next && (!lab || Date.now() - lab > 42 * DAY)) {
+  if (!visit && next && (!lab || Date.now() - lab > 42 * DAY)) {
     const t = new Date(next.t); t.setHours(8, 0, 0, 0);
     ev(t.getTime(), 'Баланс: сдать анализы перед уколом', 'Натощак: тест общий, E2, пролактин, ОАК, липиды, АЛТ/АСТ, ПСА', ['-P1D', '-PT0M']);
   }
