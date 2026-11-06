@@ -343,3 +343,95 @@ export function buildIcs(s) {
 }
 
 export { DAY, POP_SCALE, COMPOUNDS, MARKERS, byId, markerById };
+
+/* ---------- метаболизм ---------- */
+// Реальный расход считается по факту: средние калории − изменение тренда веса × 7700 ккал/кг.
+// Тренд веса — сглаженная средняя (как в «Hacker's Diet»), чтобы вода и соль не сбивали.
+const KCAL_PER_KG = 7700;
+export const ACTIVITY = [
+  [1.3, 'Сидячая работа, зал 3 раза'], [1.45, 'Зал 4–5 раз, мало шагов'], [1.6, 'Зал + 8–10 тыс. шагов'], [1.75, 'Физическая работа или много кардио'],
+];
+
+function dailyRows(s) {
+  const map = new Map();
+  for (const x of s.symptoms) {
+    const d = new Date(x.t); d.setHours(12, 0, 0, 0);
+    map.set(d.getTime(), x);
+  }
+  return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([day, x]) => ({ day, ...x }));
+}
+
+export function weightTrend(s) {
+  const rows = dailyRows(s).filter((r) => r.weight);
+  if (!rows.length) return [];
+  const out = [];
+  let tr = rows[0].weight, i = 0;
+  for (let d = rows[0].day; d <= rows[rows.length - 1].day; d += DAY) {
+    if (i < rows.length && Math.abs(rows[i].day - d) < DAY / 2) { tr += 0.1 * (rows[i].weight - tr); out.push({ t: d, v: tr, raw: rows[i].weight }); i++; }
+    else out.push({ t: d, v: tr, raw: null });
+  }
+  return out;
+}
+
+export function bmrExpected(s, weightKg) {
+  const p = s.profile || {};
+  if (!weightKg) return null;
+  if (p.bodyFat) return 370 + 21.6 * weightKg * (1 - p.bodyFat / 100);
+  if (!p.height || !p.birthYear) return null;
+  const age = new Date().getFullYear() - p.birthYear;
+  return 10 * weightKg + 6.25 * p.height - 5 * age + 5;
+}
+
+function tdeeWindow(s, trend, endT, days = 21) {
+  const startT = endT - days * DAY;
+  const rows = dailyRows(s).filter((r) => r.day > startT && r.day <= endT);
+  const kc = rows.filter((r) => r.kcal);
+  const tS = trend.find((p) => p.t >= startT), tE = [...trend].reverse().find((p) => p.t <= endT);
+  if (kc.length < 10 || !tS || !tE || (tE.t - tS.t) / DAY < 13) return null;
+  const span = (tE.t - tS.t) / DAY;
+  const avgKcal = kc.reduce((a, r) => a + r.kcal, 0) / kc.length;
+  const dKg = tE.v - tS.v;
+  return { t: endT, tdee: avgKcal - (dKg * KCAL_PER_KG) / span, avgKcal, dKg, span, weekRate: (dKg / span) * 7, weight: tE.v };
+}
+
+export function metabolism(s) {
+  const trend = weightTrend(s);
+  const rows = dailyRows(s);
+  const now = Date.now();
+  const cur = trend.length ? tdeeWindow(s, trend, trend[trend.length - 1].t) : null;
+  const weight = trend.length ? trend[trend.length - 1].v : null;
+  const bmr = bmrExpected(s, weight);
+  const act = (s.profile || {}).activity || 1.45;
+  const expected = bmr ? bmr * act : null;
+  const adapt = cur && expected ? (cur.tdee - expected) / expected : null;
+  // история расхода по неделям
+  const hist = [];
+  if (trend.length) for (let t = trend[trend.length - 1].t; t > trend[0].t + 13 * DAY && hist.length < 16; t -= 7 * DAY) {
+    const w = tdeeWindow(s, trend, t); if (w) hist.unshift(w);
+  }
+  // недель подряд в дефиците
+  let deficitWeeks = 0;
+  for (let i = hist.length - 1; i >= 0; i--) { if (hist[i].avgKcal < hist[i].tdee - 300) deficitWeeks++; else break; }
+  const last = (n) => rows.filter((r) => now - r.day < n * DAY);
+  const avg = (arr, k) => { const v = arr.filter((r) => r[k] != null && r[k] !== ''); return v.length ? v.reduce((a, r) => a + +r[k], 0) / v.length : null; };
+  const protein = avg(last(14), 'protein');
+  const sleepH = avg(last(14), 'sleepH');
+  const steps7 = avg(last(7), 'steps');
+  const stepsPrev = avg(rows.filter((r) => now - r.day >= 7 * DAY && now - r.day < 28 * DAY), 'steps');
+  const tdeeDrop = hist.length >= 3 ? (hist[hist.length - 1].tdee - Math.max(...hist.slice(0, -1).map((h) => h.tdee))) / Math.max(...hist.slice(0, -1).map((h) => h.tdee)) : null;
+  let status = null;
+  if (adapt != null) status = adapt < -0.1 ? { st: 'warning', label: 'Замедлился' } : adapt > 0.05 ? { st: 'good', label: 'Разогнан' } : { st: 'good', label: 'В норме' };
+  else if (tdeeDrop != null && tdeeDrop < -0.08) status = { st: 'warning', label: 'Замедляется' };
+  // причины
+  const why = [];
+  const lv = latestValues(s);
+  if (deficitWeeks >= 8) why.push({ st: 'warning', title: `${deficitWeeks} недель в дефиците`, text: 'Тело долго недоедает и начинает экономить: меньше двигаешься неосознанно, холоднее, вялость, тянет на еду. Это главная причина «застоя» на сушке.', fix: 'diet-break' });
+  if (tdeeDrop != null && tdeeDrop < -0.08) why.push({ st: 'warning', title: `Расход упал на ${Math.round(-tdeeDrop * 100)}%`, text: 'Тратишь заметно меньше, чем пару недель назад. Обычно это дефицит, недосып или меньше шагов.' });
+  if (steps7 != null && stepsPrev != null && steps7 < stepsPrev * 0.8) why.push({ st: 'warning', title: 'Шагов стало меньше', text: `Было ≈ ${Math.round(stepsPrev)} в день, сейчас ≈ ${Math.round(steps7)}. Повседневное движение — до 30% всего расхода, и оно первым «проседает» на диете.`, fix: 'steps' });
+  if (sleepH != null && sleepH < 7) why.push({ st: 'warning', title: `Сон ${round(sleepH, 1)} ч`, text: 'Недосып снижает расход, усиливает голод и тягу к сладкому, а ещё бьёт по тестостерону и восстановлению.', fix: 'sleep' });
+  if (protein != null && weight && protein / weight < 1.6) why.push({ st: 'info', title: `Белка ${round(protein / weight, 1)} г/кг`, text: 'Мало белка — меньше мышц и меньше энергии уходит на переваривание.', fix: 'protein' });
+  if (lv.tsh && lv.tsh.v > 4) why.push({ st: 'serious', title: `ТТГ ${round(lv.tsh.v, 2)}`, text: 'Щитовидка работает слабее: вялость, мёрзнешь, вес стоит, отёки. Это к эндокринологу.', labs: true });
+  if (lv.ft3 && lv.ft3.v < 3.1) why.push({ st: 'warning', title: 'Т3 свободный низкий', text: 'Частая история после долгого дефицита: тело «прикручивает» обмен. Обычно выравнивается после выхода на поддержку.', fix: 'diet-break' });
+  if (cur && cur.weekRate < 0 && weight && -cur.weekRate / weight > 0.01) why.push({ st: 'warning', title: 'Худеешь слишком быстро', text: `≈ ${round(-cur.weekRate, 2)} кг в неделю — больше 1% веса. Так уходят и мышцы, а обмен тормозит сильнее.` });
+  return { trend, cur, weight, bmr, expected, adapt, hist, status, why, protein, sleepH, steps7, deficitWeeks, need: { kcalDays: rows.filter((r) => r.kcal).length, weightDays: rows.filter((r) => r.weight).length } };
+}
