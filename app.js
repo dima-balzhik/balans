@@ -110,8 +110,8 @@ function lineChart(el, { series, from, to, band, labs = [], doses = [], unit, co
   const now = Date.now();
   const maxV = Math.max(...series.map((p) => p.v), ...labs.map((l) => l.v), band ? band[1] : 0, 1);
   const y0 = minV > 0 ? (maxV - minV > 100 ? Math.floor(minV / 100) * 100 : Math.floor(minV)) : 0;
-  const step = y0 ? niceMax(((maxV - y0) * 1.06) / 4) : 0;
-  const yMax = y0 ? y0 + step * 4 : niceMax(maxV * 1.08);
+  const step = y0 ? niceMax(((maxV - y0) * 1.06) / 4) : niceMax((maxV * 1.08) / 4);
+  const yMax = y0 + step * 4;
   const x = (t) => pl + ((t - from) / (to - from)) * (W - pl - pr);
   const y = (v) => pt + (1 - (v - y0) / (yMax - y0)) * (H - pt - pb);
   const ticks = [0, 1, 2, 3, 4].map((i) => y0 + ((yMax - y0) * i) / 4);
@@ -159,13 +159,72 @@ function niceMax(v) {
   return 10 * p;
 }
 
+/* ---------- дашборд ---------- */
+function spark(pts, color = 'var(--series-1)') {
+  if (!pts || pts.length < 2) return '';
+  const W = 120, H = 30, vs = pts.map((p) => p.v), mn = Math.min(...vs), mx = Math.max(...vs), r = mx - mn || 1;
+  const x = (i) => (i / (pts.length - 1)) * W, y = (v) => H - 3 - ((v - mn) / r) * (H - 6);
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts.map((p, i) => `${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function tile({ go, label, value, unit = '', sub = '', st = null, stLabel = '', sp = '' }) {
+  const bad = st && st !== 'good';
+  return `<button class="tile" data-tile="${go}"><div class="row between"><span class="k">${label}</span>${bad ? `<span class="st-${st}">${ic(st, 'tic')}</span>` : ''}</div>
+    <div class="v">${value}${unit ? `<small>${unit}</small>` : ''}</div>
+    ${sp}<div class="d ${bad ? `st-${st}` : ''}">${esc(stLabel || sub)}</div></button>`;
+}
+function dashboard() {
+  const now = Date.now();
+  const lv = E.latestValues(S);
+  const M = E.metabolism(S);
+  const tiles = [];
+  const bp = [...S.bp].sort((a, b) => a.t - b.t);
+  const week = bp.filter((b) => now - b.t < 7 * DAY);
+  let bpHtml;
+  if (week.length) {
+    const sys = Math.round(week.reduce((a, b) => a + b.sys, 0) / week.length), dia = Math.round(week.reduce((a, b) => a + b.dia, 0) / week.length);
+    const st = E.bpStatus(sys, dia), last = bp.at(-1);
+    bpHtml = `<div class="tile wide"><div class="row between"><span class="k">Давление · 7 дней</span>${badge(st.st, st.label)}</div>
+      <div class="row between" style="align-items:flex-end"><div><div class="v">${sys}/${dia}<small>мм рт. ст.</small></div><div class="d">последнее ${last.sys}/${last.dia} · ${fmtDT(last.t)}</div></div>
+      ${spark(bp.slice(-14).map((b) => ({ v: b.sys })), st.st === 'good' ? 'var(--series-1)' : `var(--${st.st})`)}</div>
+      <div class="row" style="margin-top:12px"><button class="btn sm grow" data-act="add-bp">${ic('plus')}Измерить</button>${st.st !== 'good' ? '<button class="btn sm soft grow" data-act="bp-actions">Что делать</button>' : ''}</div></div>`;
+  } else {
+    bpHtml = `<div class="tile wide"><div class="row between"><span class="k">Давление</span>${bp.length ? badge('warning', 'неделю не мерил') : ''}</div>
+      <div class="d" style="margin:6px 0 12px">${bp.length ? `Последнее ${bp.at(-1).sys}/${bp.at(-1).dia} — ${fmtDate(bp.at(-1).t)}` : 'На курсе мерь 2–3 раза в неделю: утром, сидя, после 5 минут покоя.'}</div>
+      <button class="btn sm block" data-act="add-bp">${ic('plus')}Измерить</button></div>`;
+  }
+  if (M.cur) tiles.push(tile({ go: 'feel', label: 'Расход', value: Math.round(M.cur.tdee / 10) * 10, unit: 'ккал', st: M.status?.st, stLabel: M.status && M.status.st !== 'good' ? M.status.label : `${M.cur.weekRate >= 0 ? '+' : '−'}${round(Math.abs(M.cur.weekRate), 2)} кг/нед`, sp: spark(M.hist.map((h) => ({ v: h.tdee }))) }));
+  if (M.weight) {
+    const wk = M.trend.length > 7 ? M.weight - M.trend.at(-8).v : null;
+    tiles.push(tile({ go: 'feel', label: 'Вес (тренд)', value: round(M.weight, 1), unit: 'кг', sub: wk != null ? `${wk >= 0 ? '+' : '−'}${round(Math.abs(wk), 1)} кг за неделю` : '', sp: spark(M.trend.slice(-30)) }));
+  }
+  for (const id of ['hct', 'e2', 'hdl', 'tsh']) {
+    if (!lv[id]) continue;
+    const m = markerById(id), st = E.markerStatus(m, lv[id].v);
+    const pts = S.labs.filter((l) => l.values[id] != null).sort((a, b) => a.t - b.t).map((l) => ({ v: l.values[id] }));
+    const dir = lv[id].v > (m.hi ?? Infinity) ? 'выше нормы' : 'ниже нормы';
+    tiles.push(tile({ go: `marker:${id}`, label: m.name.replace(' (E2)', ''), value: round(lv[id].v, id === 'hdl' ? 2 : 1), unit: m.base, st, stLabel: st && st !== 'good' ? dir : `${fmtDate(lv[id].t)} · норма`, sp: spark(pts) }));
+  }
+  const sym = S.symptoms.filter((x) => now - x.t < 7 * DAY);
+  if (sym.length) {
+    const lib = sym.reduce((a, x) => a + (x.libido || 3), 0) / sym.length;
+    const st = lib <= 2.5 ? 'warning' : null;
+    tiles.push(tile({ go: 'feel', label: 'Либидо, 7 дней', value: round(lib, 1), unit: 'из 5', st, stLabel: st ? 'просело' : lib >= 4 ? 'хорошо' : 'обычно', sp: spark([...S.symptoms].sort((a, b) => a.t - b.t).slice(-14).map((x) => ({ v: x.libido || 3 }))) }));
+    if (M.sleepH != null) tiles.push(tile({ go: 'feel', label: 'Сон, 2 недели', value: round(M.sleepH, 1), unit: 'ч', st: M.sleepH < 7 ? 'warning' : null, stLabel: M.sleepH < 7 ? 'мало' : 'норм' }));
+  }
+  const lab = E.lastLabDate(S);
+  const days = lab ? Math.floor((now - lab) / DAY) : null;
+  tiles.push(tile({ go: 'health', label: 'Анализы', value: days == null ? '—' : days, unit: days == null ? '' : 'дн. назад', st: days == null || days > 56 ? 'warning' : null, stLabel: days == null ? 'ещё не сдавал' : days > 56 ? 'пора сдать' : 'свежие' }));
+  if (tiles.length % 2) tiles.push('<div class="tile ghost-tile" aria-hidden="true"></div>');
+  return `${bpHtml}<div class="tiles">${tiles.join('')}</div>`;
+}
+
 /* ---------- Сегодня ---------- */
 function viewToday() {
   const now = Date.now();
   const sum = E.testoSummary(S);
   const cal = E.calibration(S);
   const load = E.weeklyLoad(S);
-  const rem = [...E.reminders(S), ...E.symptomHints(S)];
+  const rem = [...E.reminders(S).filter((x) => x.action !== 'bp'), ...E.symptomHints(S)];
   const risks = E.checkStack(S).filter((r) => r.st === 'critical' || r.st === 'serious');
   const others = E.activeHormones(S).filter((h) => h !== 'testosterone');
   const d = new Date();
@@ -193,7 +252,9 @@ function viewToday() {
   const trough = sum?.nextTrough ? `<div class="alert"><span class="ic st-info">${ic('info', 'ic')}</span><div><div class="t">Ближайший минимум — ${fmtDT(sum.nextTrough.t)}</div><div class="x">≈ ${round(sum.nextTrough.v, 0)} нмоль/л перед следующим уколом. В этот момент удобно сдавать анализы: минимум точнее всего калибрует модель.</div></div></div>` : '';
   return `<div class="top"><div><h1>Сегодня</h1><div class="sub">${d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}</div></div></div>
     ${hero}
-    ${sum ? `<div class="card"><div class="row between"><h3>Кривая тестостерона</h3></div>
+    <h2 class="sec">Показатели</h2>
+    ${dashboard()}
+    ${sum ? `<h2 class="sec">Тестостерон</h2><div class="card"><div class="row between"><h3>Кривая</h3></div>
       <div class="seg" style="margin:10px 0 14px">${[[14, '2 нед'], [21, '3 нед'], [45, '6 нед'], [90, '3 мес']].map(([v, l]) => `<button data-range="${v}" aria-pressed="${range === v}">${l}</button>`).join('')}</div>
       <div class="chart" id="ch-test"></div>
       <div class="legend"><span><i style="background:var(--series-1)"></i>Оценка</span><span><i style="background:var(--series-1);opacity:.45"></i>Прогноз</span><span><i class="band"></i>Норма 8,6–29</span><span><i class="ring"></i>Анализ</span></div>
@@ -691,6 +752,7 @@ function bind(v) {
   }
   $$('[data-metab]', v).forEach((b) => (b.onclick = () => metabActionsSheet(b.dataset.metab)));
   $$('[data-marker-go]', v).forEach((b) => (b.onclick = () => go('health', { kind: 'marker', id: b.dataset.markerGo })));
+  $$('[data-tile]', v).forEach((b) => (b.onclick = () => { const g = b.dataset.tile; if (g.startsWith('marker:')) go('health', { kind: 'marker', id: g.slice(7) }); else go(g); }));
   $$('[data-range]', v).forEach((b) => (b.onclick = () => { range = +b.dataset.range; render(); }));
   $$('[data-back]', v).forEach((b) => (b.onclick = () => { if (sub?.kind === 'compound') go('more', { kind: 'db' }); else go(tab); }));
   $$('[data-goto]', v).forEach((b) => (b.onclick = () => { const g = b.dataset.goto; if (g === 'labs') labSheet(); else if (g === 'bp') bpSheet(); else go(g); }));
